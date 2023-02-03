@@ -1,0 +1,150 @@
+diff -ruN somebar.orig/src/bar.cpp somebar/src/bar.cpp
+--- somebar.orig/src/bar.cpp	2023-01-30 00:48:41.000000000 +0000
++++ somebar/src/bar.cpp	2023-02-03 21:42:50.546913655 +0000
+@@ -81,6 +81,11 @@
+ 	pango_layout_set_text(pangoLayout.get(), _text->c_str(), _text->size());
+ }
+ 
++void BarComponent::setAttributes(PangoAttrList *attrs)
++{
++	pango_layout_set_attributes(pangoLayout.get(), attrs);
++}
++
+ Bar::Bar()
+ {
+ 	_pangoContext.reset(pango_font_map_create_context(pango_cairo_font_map_get_default()));
+@@ -156,7 +161,16 @@
+ }
+ void Bar::setStatus(const std::string& status)
+ {
+-	_statusCmp.setText(status);
++	char *buf;
++	GError *error = NULL;
++	PangoAttrList *attrs;
++	if (pango_parse_markup(status.c_str(), -1, 0, &attrs, &buf, NULL, &error)) {
++		_statusCmp.setText(buf);
++		_statusCmp.setAttributes(attrs);
++	}
++	else {
++		_statusCmp.setText(error->message);
++	}
+ }
+ 
+ void Bar::invalidate()
+@@ -240,20 +254,49 @@
+ 
+ void Bar::renderTags()
+ {
++	// Check if all tags are active (Mod+0)
++	bool allActive = true;
++	for (auto &tag : _tags) {
++		if (tag.state & TagState::Active){
++			if (!allActive){
++				allActive = true;
++				break;
++			}
++			allActive = false;
++		}
++	}
++
++	bool renderThis;
+ 	for (auto &tag : _tags) {
++		renderThis = false;
+ 		setColorScheme(
+ 			tag.state & TagState::Active ? colorActive : colorInactive,
+ 			tag.state & TagState::Urgent);
+-		renderComponent(tag.component);
++		// Reder active tag if it's the only one active
++		if (!allActive && tag.state & TagState::Active)
++			renderThis = true;
+ 		auto indicators = std::min(tag.numClients, static_cast<int>(_bufs->height/2));
+ 		for (auto ind = 0; ind < indicators; ind++) {
+-			auto w = ind == tag.focusedClient ? 7 : 1;
+-			cairo_move_to(_painter, tag.component.x, ind*2+0.5);
+-			cairo_rel_line_to(_painter, w, 0);
+-			cairo_close_path(_painter);
+-			cairo_set_line_width(_painter, 1);
+-			cairo_stroke(_painter);
++			// render tags having indicators
++			if (tag.focusedClient == -1)
++				renderThis = true;
++			// render tags having the focused client
++			if (tag.focusedClient == 0){
++				renderThis = true;
++			}
++      cairo_rectangle(_painter, tag.component.x+3, ind*2+2, 8, 8);
++      if(ind == tag.focusedClient){
++        cairo_stroke_preserve(_painter);
++        cairo_fill(_painter);
++      }
++      else{
++        cairo_set_line_width(_painter, 1);
++        cairo_set_line_join(_painter, CAIRO_LINE_JOIN_MITER);
++        cairo_stroke(_painter);
++      }
+ 		}
++		if (renderThis)
++			renderComponent(tag.component);
+ 	}
+ }
+ 
+@@ -265,6 +308,7 @@
+ 	cairo_rectangle(_painter, _x, 0, _bufs->width-_x+start, _bufs->height);
+ 	cairo_fill(_painter);
+ 
++  setColorScheme(colorInactive);
+ 	_x = start;
+ 	renderComponent(_statusCmp);
+ }
+diff -ruN somebar.orig/src/bar.hpp somebar/src/bar.hpp
+--- somebar.orig/src/bar.hpp	2023-01-30 00:48:41.000000000 +0000
++++ somebar/src/bar.hpp	2023-02-03 21:42:40.716914058 +0000
+@@ -17,6 +17,7 @@
+ 	explicit BarComponent(wl_unique_ptr<PangoLayout> layout);
+ 	int width() const;
+ 	void setText(const std::string& text);
++	void setAttributes(PangoAttrList *attrs);
+ 	wl_unique_ptr<PangoLayout> pangoLayout;
+ 	int x {0};
+ };
+diff -ruN somebar.orig/src/config.def.hpp somebar/src/config.def.hpp
+--- somebar.orig/src/config.def.hpp	2023-01-30 00:48:41.000000000 +0000
++++ somebar/src/config.def.hpp	2023-02-03 21:42:50.546913655 +0000
+@@ -10,18 +10,17 @@
+ constexpr int paddingY = 3;
+ 
+ // See https://docs.gtk.org/Pango/type_func.FontDescription.from_string.html
+-constexpr const char* font = "Sans 12";
++constexpr const char* font = "Sans 11";
+ 
+ constexpr ColorScheme colorInactive = {Color(0xbb, 0xbb, 0xbb), Color(0x22, 0x22, 0x22)};
+-constexpr ColorScheme colorActive = {Color(0xee, 0xee, 0xee), Color(0x00, 0x55, 0x77)};
+-constexpr const char* termcmd[] = {"foot", nullptr};
++constexpr ColorScheme colorActive = {Color(0xff, 0xff, 0xff), Color(0x56, 0x58, 0x64)};
++constexpr const char* volcmd[] = {"toggle_volume", nullptr};
+ 
+ static std::vector<std::string> tagNames = {
+-	"1", "2", "3",
+-	"4", "5", "6",
+-	"7", "8", "9",
++	"", "", "",
++	"", "", "",
++	"", "", "",
+ };
+-
+ constexpr Button buttons[] = {
+-	{ ClkStatusText,   BTN_RIGHT,  spawn,      {.v = termcmd} },
++	{ ClkStatusText,   BTN_RIGHT,  spawn,      {.v = volcmd} },
+ };
+diff -ruN somebar.orig/src/main.cpp somebar/src/main.cpp
+--- somebar.orig/src/main.cpp	2023-01-30 00:48:41.000000000 +0000
++++ somebar/src/main.cpp	2023-02-03 21:42:50.547913655 +0000
+@@ -129,7 +129,7 @@
+ 		auto& seat = *static_cast<Seat*>(sp);
+ 		seat.pointer->focusedMonitor = monitorFromSurface(surface);
+ 		if (!cursorImage) {
+-			auto cursorTheme = wl_cursor_theme_load(nullptr, 24, shm);
++			auto cursorTheme = wl_cursor_theme_load(nullptr, 32, shm);
+ 			cursorImage = wl_cursor_theme_get_cursor(cursorTheme, "left_ptr")->images[0];
+ 			cursorSurface = wl_compositor_create_surface(compositor);
+ 			wl_surface_attach(cursorSurface, wl_cursor_image_get_buffer(cursorImage), 0, 0);
