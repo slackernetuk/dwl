@@ -1,4 +1,11 @@
-# dwl - dwm for Wayland
+# My personal DWL configuration
+
+incl somebar and someblocks.
+
+
+![screenshot-1675463389_grim](https://user-images.githubusercontent.com/54255275/216735667-ee6e846b-8692-4ea0-a9e6-8ddcd24954c2.png)
+
+
 
 Join us on our [Discord server] or at [#dwl] on irc.libera.chat.
 
